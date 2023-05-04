@@ -1,0 +1,12 @@
+apiVersion: pkg.crossplane.io/v1
+kind: ProviderRevision
+metadata:
+  labels:
+    pkg.crossplane.io/package: provider-dummy
+spec:
+  revision: 1
+status:
+  conditions:
+    - reason: HealthyPackageRevision
+      status: "True"
+      type: Healthy

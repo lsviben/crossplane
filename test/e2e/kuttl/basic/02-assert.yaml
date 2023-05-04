@@ -1,0 +1,18 @@
+apiVersion: apiextensions.crossplane.io/v1beta1
+kind: CompositionRevision
+spec:
+  revision: 1
+---
+
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xrobots.dummy.crossplane.io
+status:
+  controllers:
+    compositeResourceClaimType:
+      apiVersion: dummy.crossplane.io/v1alpha1
+      kind: Robot
+    compositeResourceType:
+      apiVersion: dummy.crossplane.io/v1alpha1
+      kind: XRobot
