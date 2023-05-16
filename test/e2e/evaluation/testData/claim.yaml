@@ -1,0 +1,7 @@
+apiVersion: dummy.crossplane.io/v1alpha1
+kind: Robot
+metadata:
+  name: test-robot
+  namespace: default
+spec:
+  color: blue
