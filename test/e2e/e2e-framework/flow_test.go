@@ -1,4 +1,4 @@
-package evaluation
+package e2e_framework
 
 import (
 	"context"
