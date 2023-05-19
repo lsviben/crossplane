@@ -1,0 +1,23 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: robots-test
+  labels:
+    crossplane.io/xrd: xrobots.dummy.crossplane.io
+    provider: dummy-provider
+spec:
+  compositeTypeRef:
+    apiVersion: dummy.crossplane.io/v1alpha1
+    kind: XRobot
+  writeConnectionSecretsToNamespace: default
+  resources:
+    - name: robot
+      base:
+        apiVersion: iam.dummy.upbound.io/v1alpha1
+        kind: Robot
+        spec:
+          forProvider: {}
+      patches:
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.color
+          toFieldPath: spec.forProvider.color

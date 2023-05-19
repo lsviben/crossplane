@@ -1,0 +1,6 @@
+apiVersion: dummy.upbound.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  endpoint: http://server-dummy.crossplane-system.svc.cluster.local

@@ -1,0 +1,31 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xrobots.dummy.crossplane.io
+  labels:
+    provider: dummy-provider
+spec:
+  defaultCompositionRef:
+    name: robots-test
+  group: dummy.crossplane.io
+  names:
+    kind: XRobot
+    plural: xrobots
+  claimNames:
+    kind: Robot
+    plural: robots
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                color:
+                  type: string
+              required:
+                - color
