@@ -17,8 +17,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/pointer"
+	"sigs.k8s.io/e2e-framework/klient/k8s"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
 	"sigs.k8s.io/e2e-framework/klient/wait"
+	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
@@ -65,26 +67,13 @@ func TestFlow(t *testing.T) {
 		WithTeardown("teardown the Composition", teardownComposition).
 		WithSetup("xrd is established and offered", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			xrd := genXRD()
-			err := wait.For(func() (done bool, err error) {
-
-				if err := cfg.Client().Resources().Get(ctx, xrd.Name, "", xrd); err != nil {
-					return false, err
-				}
-
-				if xrd.Status.GetCondition(extv1.TypeEstablished).Status != corev1.ConditionTrue {
-					t.Logf("XRD %q is not yet Established", xrd.GetName())
-					return false, nil
-				}
-
-				if xrd.Status.GetCondition(extv1.TypeOffered).Status != corev1.ConditionTrue {
-					t.Logf("XRD %q is not yet Offered", xrd.GetName())
-					return false, nil
-				}
-
-				return true, nil
-			}, wait.WithTimeout(time.Minute*1))
+			err := wait.For(conditions.New(cfg.Client().Resources()).ResourceMatch(xrd, func(object k8s.Object) bool {
+				o := object.(*extv1.CompositeResourceDefinition)
+				return o.Status.GetCondition(extv1.TypeEstablished).Status == corev1.ConditionTrue &&
+					o.Status.GetCondition(extv1.TypeOffered).Status == corev1.ConditionTrue
+			}), wait.WithTimeout(time.Minute*1))
 			if err != nil {
-				t.Fatalf("failed to wait for xrd to be healthy: %v", err)
+				t.Fatalf("failed to wait for XRD to be established and offered: %v", err)
 			}
 			return ctx
 		}).
@@ -95,21 +84,15 @@ func TestFlow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to get claim: %v", err)
 			}
-			err = wait.For(func() (done bool, err error) {
-
-				if err := cfg.Client().Resources().Get(ctx, claim.GetName(), "default", claim); err != nil {
-					return false, err
-				}
-
+			err = wait.For(conditions.New(cfg.Client().Resources()).ResourceMatch(claim, func(object k8s.Object) bool {
 				claimObj := composed.Unstructured{Unstructured: *claim}
 				isReady := claimObj.GetCondition(xpv1.TypeReady)
 				if isReady.Status != corev1.ConditionTrue {
 					t.Logf("claim %q is not yet Ready", claim.GetName())
-					return false, nil
+					return false
 				}
-
-				return true, nil
-			}, wait.WithTimeout(time.Minute*1))
+				return isReady.Status == corev1.ConditionTrue
+			}), wait.WithTimeout(time.Minute*1))
 			if err != nil {
 				t.Fatalf("failed to wait for claim to be Ready: %v", err)
 			}
