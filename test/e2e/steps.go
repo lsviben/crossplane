@@ -68,6 +68,41 @@ func composedManagedResourcesBecomeReadyAndSynchronized(ctx context.Context) err
 	return nil
 }
 
+func claimCompositeHasValueOnPath(ctx context.Context, path, value string) error {
+	sc := ScenarioContextValue(ctx)
+	c := sc.Cluster
+	compositeRef := sc.ClaimCompositeResourceRef
+	ns := sc.Namespace
+
+	err := c.WaitForResourceValueMatch(compositeRef.Type(), compositeRef.Name, ns, path, value)
+
+	return err
+}
+
+func composedManagedResourceHasValueOnPath(ctx context.Context, path, value string) error {
+	sc := ScenarioContextValue(ctx)
+	c := sc.Cluster
+	compositeRef := sc.ClaimCompositeResourceRef
+	ns := sc.Namespace
+	rawJSON, err := c.GetAndFilterResourceByJq(compositeRef.Type(), compositeRef.Name, ns, ".spec.resourceRefs")
+	if err != nil {
+		return err
+	}
+	var refs []resourceRef
+	if err = json.Unmarshal([]byte(rawJSON), &refs); err != nil {
+		return err
+	}
+	// this is a hack, ideally we would have a way to get the resource by name, but provider-dummy does not support
+	// setting names yet, so this now only works when there is a single managed resource
+	if len(refs) == 0 {
+		return fmt.Errorf("no managed resources found")
+	}
+
+	err = c.WaitForResourceValueMatch(refs[0].Type(), refs[0].Name, ns, path, value)
+
+	return err
+}
+
 func configurationGetsDeployed(ctx context.Context, rawYaml *godog.DocString) (context.Context, error) {
 	sc := ScenarioContextValue(ctx)
 	xpCfg, err := ToUnstructured(rawYaml.Content)

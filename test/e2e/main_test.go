@@ -64,4 +64,6 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^provider (\S+) does not get installed$`, providerNotInstalled)
 	ctx.Step(`^provider (\S+) is marked as installed and healthy$`, providerMarkedAsInstalledAndHealthy)
 	ctx.Step(`^provider (\S+) is running in cluster$`, providerGetsInstalled)
+	ctx.Step(`^claim composite has (\S+) set to (\S+)$`, claimCompositeHasValueOnPath)
+	ctx.Step(`^composed managed resource has (\S+) set to (\S+)$`, composedManagedResourceHasValueOnPath)
 }
