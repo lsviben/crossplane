@@ -83,7 +83,7 @@ updated with the latest observation of the resource.
 
 ### Management Policy
 
-**Warning**
+[!WARNING]  
 The management policy was significantly changed in a
 subsequent design for [ignore changes]. Keeping this section for historical
 purposes.
