@@ -40,6 +40,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource/unstructured/claim"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource/unstructured/composite"
 
+	v1 "github.com/crossplane/crossplane/v2/apis/apiextensions/v1"
 	"github.com/crossplane/crossplane/v2/internal/names"
 )
 
@@ -91,16 +92,16 @@ type ManagedFieldsUpgrader interface {
 // A CompositeSyncer binds and syncs the supplied claim with the supplied
 // composite resource (XR).
 type CompositeSyncer interface {
-	Sync(ctx context.Context, cm *claim.Unstructured, xr *composite.Unstructured) error
+	Sync(ctx context.Context, cm *claim.Unstructured, xr *composite.Unstructured, hasEnforcedComposition bool) error
 }
 
 // A CompositeSyncerFn binds and syncs the supplied claim with the supplied
 // composite resource (XR).
-type CompositeSyncerFn func(ctx context.Context, cm *claim.Unstructured, xr *composite.Unstructured) error
+type CompositeSyncerFn func(ctx context.Context, cm *claim.Unstructured, xr *composite.Unstructured, hasEnforcedComposition bool) error
 
 // Sync the supplied claim with the supplied composite resource.
-func (fn CompositeSyncerFn) Sync(ctx context.Context, cm *claim.Unstructured, xr *composite.Unstructured) error {
-	return fn(ctx, cm, xr)
+func (fn CompositeSyncerFn) Sync(ctx context.Context, cm *claim.Unstructured, xr *composite.Unstructured, hasEnforcedComposition bool) error {
+	return fn(ctx, cm, xr, hasEnforcedComposition)
 }
 
 // A ConnectionSecretOwner may create and manage a connection secret in any
@@ -339,8 +340,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 			err = errors.Wrap(err, errGetComposite)
 			record.Event(cm, event.Warning(reasonBind, err))
 			status.MarkConditions(xpv1.ReconcileError(err))
+			_ = r.client.Status().Update(ctx, cm)
 
-			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+			return reconcile.Result{}, err
 		}
 	}
 
@@ -359,8 +361,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		err := errors.Errorf(errFmtUnbound, xr.GetName(), ref.Name)
 		record.Event(cm, event.Warning(reasonBind, err))
 		status.MarkConditions(xpv1.ReconcileError(err))
+		_ = r.client.Status().Update(ctx, cm)
 
-		return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+		// Returning nil is intentional - see comment above.
+		return reconcile.Result{}, nil
 	}
 
 	// TODO(negz): Remove this call to Upgrade once no supported version of
@@ -376,8 +380,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		err = errors.Wrap(err, errUpgradeManagedFields)
 		record.Event(cm, event.Warning(reasonBind, err))
 		status.MarkConditions(xpv1.ReconcileError(err))
+		_ = r.client.Status().Update(ctx, cm)
 
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+		return reconcile.Result{}, err
 	}
 
 	if meta.WasDeleted(cm) {
@@ -405,8 +410,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 				err = errors.Wrap(err, errDeleteComposite)
 				record.Event(cm, event.Warning(reasonDelete, err))
 				status.MarkConditions(xpv1.ReconcileError(err))
+				_ = r.client.Status().Update(ctx, cm)
 
-				return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+				return reconcile.Result{}, err
 			}
 
 			if requiresForegroundDeletion {
@@ -421,8 +427,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 			err = errors.Wrap(err, errRemoveFinalizer)
 			record.Event(cm, event.Warning(reasonDelete, err))
 			status.MarkConditions(xpv1.ReconcileError(err))
+			_ = r.client.Status().Update(ctx, cm)
 
-			return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+			return reconcile.Result{}, err
 		}
 
 		log.Debug("Successfully deleted claim")
@@ -439,15 +446,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		err = errors.Wrap(err, errAddFinalizer)
 		record.Event(cm, event.Warning(reasonBind, err))
 		status.MarkConditions(xpv1.ReconcileError(err))
+		_ = r.client.Status().Update(ctx, cm)
 
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+		return reconcile.Result{}, err
 	}
 
 	// The XR's claim reference before syncing. Used to determine if we bind it.
 	before := xr.GetClaimReference()
 
+	// Check if enforcedCompositionRef is set in the XRD.
+	// We use an index to efficiently look up the XRD for this composite GVK.
+	hasEnforcedComposition := false
+	xrdList := &v1.CompositeResourceDefinitionList{}
+	if err := r.client.List(ctx, xrdList, client.MatchingFields{XRDByCompositeGVKIndex(): compositeGVKKeyFor(r.gvkXR)}); err == nil && len(xrdList.Items) > 0 {
+		// There should only be one XRD for a given composite GVK
+		if xrdList.Items[0].Spec.EnforcedCompositionRef != nil {
+			hasEnforcedComposition = true
+		}
+	}
+
 	// Create (if necessary), bind, and sync an XR with the claim.
-	if err := r.composite.Sync(ctx, cm, xr); err != nil {
+	if err := r.composite.Sync(ctx, cm, xr, hasEnforcedComposition); err != nil {
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
 		}
@@ -455,8 +474,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		err = errors.Wrap(err, errSync)
 		record.Event(cm, event.Warning(reasonBind, err))
 		status.MarkConditions(xpv1.ReconcileError(err))
+		_ = r.client.Status().Update(ctx, cm)
 
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+		return reconcile.Result{}, err
 	}
 
 	// The XR didn't reference the claim before the sync, but does now.
@@ -487,8 +507,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		err = errors.Wrap(err, errPropagateCDs)
 		record.Event(cm, event.Warning(reasonPropagate, err))
 		status.MarkConditions(xpv1.ReconcileError(err))
+		_ = r.client.Status().Update(ctx, cm)
 
-		return reconcile.Result{Requeue: true}, errors.Wrap(r.client.Status().Update(ctx, cm), errUpdateClaimStatus)
+		return reconcile.Result{}, err
 	}
 
 	if propagated {

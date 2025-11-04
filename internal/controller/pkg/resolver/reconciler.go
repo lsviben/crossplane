@@ -42,7 +42,6 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/feature"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/fieldpath"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
-	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 
 	v1 "github.com/crossplane/crossplane/v2/apis/pkg/v1"
@@ -198,7 +197,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		// ImageConfigs with a pull secret.
 		Watches(&v1beta1.ImageConfig{}, handler.EnqueueRequestsFromMapFunc(ForName(lockName, HasPullSecret()))).
 		WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(NewReconciler(mgr, opts...)), o.GlobalRateLimiter))
+		Complete(errors.WithSilentRequeueOnConflict(NewReconciler(mgr, opts...)))
 }
 
 // NewReconciler creates a new lock dependency reconciler.
@@ -351,9 +350,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		}
 
 		for _, p := range l.Items {
-			source, err := fieldpath.Pave(p.Object).GetString("spec.package")
-			if err != nil {
-				continue
+			// Start with spec.package, which should always be set.
+			source, _ := fieldpath.Pave(p.Object).GetString("spec.package")
+
+			// If status.resolvedPackage is set, use that. This is
+			// the "real" package, as resolved by applying any
+			// ImageConfigs that might rewrite spec.package.
+			if resolved, err := fieldpath.Pave(p.Object).GetString("status.resolvedPackage"); err == nil && resolved != "" {
+				source = resolved
 			}
 
 			pref, err := name.ParseReference(source, name.StrictValidation)
@@ -524,6 +528,13 @@ func (r *Reconciler) findDependencyVersionToInstall(ctx context.Context, dep *v1
 		v, err := semver.NewVersion(r)
 		if err != nil {
 			// We skip any tags that are not valid semantic versions.
+			continue
+		}
+
+		// We also skip any tags that are incomplete semantic versions (e.g.,
+		// "v1" will parse as "v1.0.0"). This prevents a "v1" tag, which may not
+		// point to v1.0.0 of a package, from matching a "v1.0.0" constraint.
+		if v.String() != strings.TrimPrefix(v.Original(), "v") {
 			continue
 		}
 

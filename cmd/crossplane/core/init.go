@@ -45,7 +45,8 @@ type initCommand struct {
 	CRDsPath                  string `default:"/crds"                  env:"CRDS_PATH"            help:"Path of Crossplane core Custom Resource Definitions."`
 	WebhookConfigurationsPath string `default:"/webhookconfigurations" env:"WEBHOOK_CONFIGS_PATH" help:"Path of Crossplane core Webhook Configurations."`
 
-	WebhookEnabled          bool   `default:"true"                   env:"WEBHOOK_ENABLED"                                                                         help:"Enable webhook configuration."`
+	EnableWebhooks bool `aliases:"webhook-enabled" default:"true" env:"ENABLE_WEBHOOKS,WEBHOOK_ENABLED" help:"Enable webhook configuration."`
+
 	WebhookServiceName      string `env:"WEBHOOK_SERVICE_NAME"       help:"The name of the Service object that the webhook service will be run."`
 	WebhookServiceNamespace string `env:"WEBHOOK_SERVICE_NAMESPACE"  help:"The namespace of the Service object that the webhook service will be run."`
 	WebhookServicePort      int32  `env:"WEBHOOK_SERVICE_PORT"       help:"The port of the Service that the webhook service will be run."`
@@ -73,20 +74,24 @@ func (c *initCommand) Run(s *runtime.Scheme, log logging.Logger) error {
 		initializer.TLSCertificateGeneratorWithClientSecretName(c.TLSClientSecretName, []string{fmt.Sprintf("%s.%s", c.ServiceAccount, c.Namespace)}),
 		initializer.TLSCertificateGeneratorWithLogger(log.WithValues("Step", "TLSCertificateGenerator")),
 	}
-	if c.WebhookEnabled {
+	if c.EnableWebhooks {
 		tlsGeneratorOpts = append(tlsGeneratorOpts,
 			initializer.TLSCertificateGeneratorWithServerSecretName(c.TLSServerSecretName, initializer.DNSNamesForService(c.WebhookServiceName, c.WebhookServiceNamespace)))
 	}
 
 	steps = append(steps,
 		initializer.NewTLSCertificateGenerator(c.Namespace, c.TLSCASecretName, tlsGeneratorOpts...),
-		// Crossplane used to serve these webhooks, but now uses CEL validation.
-		initializer.NewValidatingWebhookRemover("crossplane",
-			"compositeresourcedefinitions.apiextensions.crossplane.io",
-			"compositions.apiextensions.crossplane.io",
-		),
 	)
-	if c.WebhookEnabled {
+
+	if c.EnableWebhooks {
+		// Crossplane used to serve these webhooks, but now uses CEL validation.
+		steps = append(steps,
+			initializer.NewValidatingWebhookRemover("crossplane",
+				"compositeresourcedefinitions.apiextensions.crossplane.io",
+				"compositions.apiextensions.crossplane.io",
+			),
+		)
+
 		nn := types.NamespacedName{
 			Name:      c.TLSServerSecretName,
 			Namespace: c.Namespace,
@@ -100,6 +105,7 @@ func (c *initCommand) Run(s *runtime.Scheme, log logging.Logger) error {
 			initializer.NewCoreCRDs(c.CRDsPath, s, initializer.WithWebhookTLSSecretRef(nn)),
 			initializer.NewWebhookConfigurations(c.WebhookConfigurationsPath, s, nn, svc))
 	} else {
+		log.Info("Warning: Webhooks are disabled, so deprecated ValidatingWebhookConfigurations will not be automatically deleted.")
 		steps = append(steps,
 			initializer.NewCoreCRDs(c.CRDsPath, s),
 		)
@@ -108,12 +114,9 @@ func (c *initCommand) Run(s *runtime.Scheme, log logging.Logger) error {
 	// CRD migrator steps are done after core CRDs are applied/updated, so we
 	// are always migrating to the most current storage version
 	steps = append(steps,
-		initializer.NewCoreCRDsMigrator("compositionrevisions.apiextensions.crossplane.io", "v1alpha1"),
-		initializer.NewCoreCRDsMigrator("environmentconfigs.apiextensions.crossplane.io", "v1alpha1"),
 		initializer.NewCoreCRDsMigrator("usages.apiextensions.crossplane.io", "v1beta1"),
 		initializer.NewCoreCRDsMigrator("functions.pkg.crossplane.io", "v1beta1"),
 		initializer.NewCoreCRDsMigrator("functionrevisions.pkg.crossplane.io", "v1beta1"),
-		initializer.NewCoreCRDsMigrator("locks.pkg.crossplane.io", "v1alpha1"),
 	)
 
 	if c.ESSTLSServerSecretName != "" {

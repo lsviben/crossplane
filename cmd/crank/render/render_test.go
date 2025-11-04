@@ -1545,6 +1545,131 @@ func TestRender(t *testing.T) {
 				},
 			},
 		},
+		"NamespacedXRPropagatesToComposed": {
+			reason: "A namespaced XR should propagate its namespace to composed resources",
+			args: args{
+				ctx: context.Background(),
+				in: Inputs{
+					CompositeResource: &ucomposite.Unstructured{
+						Unstructured: unstructured.Unstructured{
+							Object: MustLoadJSON(`{
+								"apiVersion": "nop.example.org/v1alpha1",
+								"kind": "XNopResource",
+								"metadata": {
+									"name": "test-render",
+									"namespace": "test-namespace"
+								}
+							}`),
+						},
+					},
+					Composition: &apiextensionsv1.Composition{
+						Spec: apiextensionsv1.CompositionSpec{
+							Mode: apiextensionsv1.CompositionModePipeline,
+							Pipeline: []apiextensionsv1.PipelineStep{
+								{
+									Step:        "test",
+									FunctionRef: apiextensionsv1.FunctionReference{Name: "function-test"},
+								},
+							},
+						},
+					},
+					Functions: []pkgv1.Function{
+						func() pkgv1.Function {
+							lis := NewFunction(t, &fnv1.RunFunctionResponse{
+								Desired: &fnv1.State{
+									Composite: &fnv1.Resource{
+										Resource: MustStructJSON(`{
+											"status": {
+												"widgets": 9001
+											}
+										}`),
+									},
+									Resources: map[string]*fnv1.Resource{
+										"a-cool-resource": {
+											Resource: MustStructJSON(`{
+												"apiVersion": "btest.crossplane.io/v1",
+												"kind": "BComposed",
+												"spec": {
+													"widgets": 9002
+												}
+											}`),
+											Ready: fnv1.Ready_READY_TRUE,
+										},
+									},
+								},
+							})
+							listeners = append(listeners, lis)
+
+							return pkgv1.Function{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "function-test",
+									Annotations: map[string]string{
+										AnnotationKeyRuntime:                  string(AnnotationValueRuntimeDevelopment),
+										AnnotationKeyRuntimeDevelopmentTarget: lis.Addr().String(),
+									},
+								},
+							}
+						}(),
+					},
+				},
+			},
+			want: want{
+				out: Outputs{
+					CompositeResource: &ucomposite.Unstructured{
+						Unstructured: unstructured.Unstructured{
+							Object: MustLoadJSON(`{
+								"apiVersion": "nop.example.org/v1alpha1",
+								"kind": "XNopResource",
+								"metadata": {
+									"name": "test-render",
+									"namespace": "test-namespace"
+								},
+								"status": {
+									"widgets": 9001,
+									"conditions": [{
+										"lastTransitionTime": "2024-01-01T00:00:00Z",
+										"type": "Ready",
+										"status": "True",
+										"reason": "Available"
+									}]
+								}
+							}`),
+						},
+					},
+					ComposedResources: []composed.Unstructured{
+						{
+							Unstructured: unstructured.Unstructured{
+								Object: MustLoadJSON(`{
+									"apiVersion": "btest.crossplane.io/v1",
+									"metadata": {
+										"generateName": "test-render-",
+										"namespace": "test-namespace",
+										"labels": {
+											"crossplane.io/composite": "test-render"
+										},
+										"annotations": {
+											"crossplane.io/composition-resource-name": "a-cool-resource"
+										},
+										"ownerReferences": [{
+											"apiVersion": "nop.example.org/v1alpha1",
+											"kind": "XNopResource",
+											"name": "test-render",
+											"blockOwnerDeletion": true,
+											"controller": true,
+											"uid": ""
+										}]
+									},
+									"kind": "BComposed",
+									"spec": {
+										"widgets": 9002
+									}
+								}`),
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for name, tc := range cases {
@@ -1847,7 +1972,7 @@ func TestFilterResources(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			f := &FilteringFetcher{resources: tc.params.ers}
+			f := NewFilteringFetcher(tc.params.ers...)
 
 			out, err := f.Fetch(tc.args.ctx, tc.args.selector)
 			if diff := cmp.Diff(tc.want.out, out, cmpopts.EquateEmpty(), cmpopts.IgnoreUnexported(fnv1.Resources{}, fnv1.Resource{}, structpb.Struct{}, structpb.Value{})); diff != "" {
@@ -1905,9 +2030,9 @@ func TestGetSecret(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := getSecret(tc.name, tc.namespace, tc.secrets)
+			_, err := GetSecret(tc.name, tc.namespace, tc.secrets)
 			if (err != nil) != tc.wantErr {
-				t.Errorf("getSecret() error = %v, wantErr %v", err, tc.wantErr)
+				t.Errorf("GetSecret() error = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
 	}
