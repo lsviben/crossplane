@@ -337,7 +337,7 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 			// so we only need to support the new required_resources field.
 			req.RequiredResources = map[string]*fnv1.Resources{}
 			for _, sel := range fn.Requirements.RequiredResources {
-				resources, err := c.resources.Fetch(ctx, ToProtobufResourceSelector(sel))
+				resources, err := c.resources.Fetch(ctx, xfn.ToProtobufResourceSelector(&sel))
 				if err != nil {
 					return CompositionResult{}, errors.Wrapf(err, errFmtFetchBootstrapRequirements, sel.RequirementName)
 				}
@@ -599,8 +599,9 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 	k := xr.GetKind()
 	ns := xr.GetNamespace()
 	n := xr.GetName()
-
 	u := xr.GetUID()
+	cs := xr.GetConditions()
+
 	if err := xfn.FromStruct(xr, d.GetComposite().GetResource()); err != nil {
 		return CompositionResult{}, errors.Wrap(err, errUnmarshalDesiredXRStatus)
 	}
@@ -610,6 +611,14 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 	xr.SetNamespace(ns)
 	xr.SetName(n)
 	xr.SetUID(u)
+
+	// Include any pending conditions so we don't lose them. SetConditions
+	// will set conditions to nil if it's not passed any arguments. SSA
+	// interprets this as null and rejects it, so we only set them if
+	// there's actually some to set.
+	if len(cs) > 0 {
+		xr.SetConditions(cs...)
+	}
 
 	// NOTE(phisco): Here we are fine using a hardcoded field owner as there is
 	// no risk of conflict between different XRs.
@@ -639,33 +648,6 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 		Conditions:        conditions,
 		TTL:               ttl,
 	}, nil
-}
-
-// ToProtobufResourceSelector converts API RequiredResourceSelector to protobuf ResourceSelector.
-func ToProtobufResourceSelector(r v1.RequiredResourceSelector) *fnv1.ResourceSelector {
-	selector := &fnv1.ResourceSelector{
-		ApiVersion: r.APIVersion,
-		Kind:       r.Kind,
-		Namespace:  r.Namespace,
-	}
-
-	// You can only set one of name or matchLabels.
-	if r.Name != nil {
-		selector.Match = &fnv1.ResourceSelector_MatchName{
-			MatchName: *r.Name,
-		}
-		return selector
-	}
-
-	if len(r.MatchLabels) > 0 {
-		selector.Match = &fnv1.ResourceSelector_MatchLabels{
-			MatchLabels: &fnv1.MatchLabels{
-				Labels: r.MatchLabels,
-			},
-		}
-	}
-
-	return selector
 }
 
 // Tag uniquely identifies a request. Two identical requests created by the

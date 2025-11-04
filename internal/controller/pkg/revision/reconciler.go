@@ -41,7 +41,6 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/parser"
-	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 
 	pkgmetav1 "github.com/crossplane/crossplane/v2/apis/pkg/meta/v1"
@@ -123,7 +122,7 @@ type ReconcilerOption func(*Reconciler)
 // Kubernetes API.
 func WithClientApplicator(ca resource.ClientApplicator) ReconcilerOption {
 	return func(r *Reconciler) {
-		r.client = ca
+		r.client = ca.Client
 	}
 }
 
@@ -290,7 +289,7 @@ func SetupProviderRevision(mgr ctrl.Manager, o controller.Options) error {
 		Watches(&v1beta1.Lock{}, EnqueuePackageRevisionsForLock(mgr.GetClient(), &v1.ProviderRevisionList{}, log)).
 		Watches(&v1beta1.ImageConfig{}, EnqueuePackageRevisionsForImageConfig(mgr.GetClient(), &v1.ProviderRevisionList{}, log))
 
-	ro := []ReconcilerOption{
+	r := NewReconciler(mgr,
 		WithCache(o.Cache),
 		WithDependencyManager(NewPackageDependencyManager(mgr.GetClient(), dag.NewMapDag, v1.ProviderGroupVersionKind, log)),
 		WithEstablisher(NewAPIEstablisher(mgr.GetClient(), o.Namespace, o.MaxConcurrentPackageEstablishers)),
@@ -304,10 +303,10 @@ func SetupProviderRevision(mgr ctrl.Manager, o controller.Options) error {
 		WithNamespace(o.Namespace),
 		WithServiceAccount(o.ServiceAccount),
 		WithFeatureFlags(o.Features),
-	}
+	)
 
 	return cb.WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(NewReconciler(mgr, ro...)), o.GlobalRateLimiter))
+		Complete(errors.WithSilentRequeueOnConflict(r))
 }
 
 // SetupConfigurationRevision adds a controller that reconciles ConfigurationRevisions.
@@ -358,7 +357,7 @@ func SetupConfigurationRevision(mgr ctrl.Manager, o controller.Options) error {
 		Watches(&v1beta1.Lock{}, EnqueuePackageRevisionsForLock(mgr.GetClient(), &v1.ConfigurationRevisionList{}, log)).
 		Watches(&v1beta1.ImageConfig{}, EnqueuePackageRevisionsForImageConfig(mgr.GetClient(), &v1.ConfigurationRevisionList{}, log)).
 		WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(r), o.GlobalRateLimiter))
+		Complete(errors.WithSilentRequeueOnConflict(r))
 }
 
 // SetupFunctionRevision adds a controller that reconciles FunctionRevisions.
@@ -394,7 +393,7 @@ func SetupFunctionRevision(mgr ctrl.Manager, o controller.Options) error {
 		Watches(&v1beta1.Lock{}, EnqueuePackageRevisionsForLock(mgr.GetClient(), &v1.FunctionRevisionList{}, log)).
 		Watches(&v1beta1.ImageConfig{}, EnqueuePackageRevisionsForImageConfig(mgr.GetClient(), &v1.FunctionRevisionList{}, log))
 
-	ro := []ReconcilerOption{
+	r := NewReconciler(mgr,
 		WithCache(o.Cache),
 		WithDependencyManager(NewPackageDependencyManager(mgr.GetClient(), dag.NewMapDag, v1.FunctionGroupVersionKind, log)),
 		WithEstablisher(NewAPIEstablisher(mgr.GetClient(), o.Namespace, o.MaxConcurrentPackageEstablishers)),
@@ -408,10 +407,10 @@ func SetupFunctionRevision(mgr ctrl.Manager, o controller.Options) error {
 		WithNamespace(o.Namespace),
 		WithServiceAccount(o.ServiceAccount),
 		WithFeatureFlags(o.Features),
-	}
+	)
 
 	return cb.WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(NewReconciler(mgr, ro...)), o.GlobalRateLimiter))
+		Complete(errors.WithSilentRequeueOnConflict(r))
 }
 
 // NewReconciler creates a new package revision reconciler.
@@ -877,17 +876,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 
 	objects := pkg.GetObjects()
-	// The CustomToManagedResourceConversion feature converts CRDs to MRDs from
-	// a provider package.
+	// The CustomToManagedResourceConversion feature selectively converts CRDs
+	// to MRDs from a provider package. Only managed resource CRDs are converted;
+	// provider configuration CRDs (ProviderConfig, etc.) remain as regular CRDs.
 	if _, ok := pkgMeta.(*pkgmetav1.Provider); ok && r.features.Enabled(features.EnableBetaCustomToManagedResourceConversion) {
-		// Convert CRDs to MRDs
+		// Convert managed resource CRDs to MRDs, leaving other CRDs unchanged
 		// If SafeStart is not in capabilities, we default mrd state to Active.
 		activationState := !pkgmetav1.CapabilitiesContainFuzzyMatch(pr.GetCapabilities(), pkgmetav1.ProviderCapabilitySafeStart)
-		if mrdObjs, err := converter.CustomToManagedResourceDefinitions(activationState, objects...); err != nil {
+		if converted, err := converter.CustomToManagedResourceDefinitions(activationState, objects...); err != nil {
 			log.Debug("failed to convert CRDs to MRDs for provider, skipping conversion", "error", err)
 			r.record.Event(pr, event.Warning(reasonConvertCRD, err))
 		} else {
-			objects = mrdObjs
+			objects = converted
 		}
 	}
 

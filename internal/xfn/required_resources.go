@@ -17,6 +17,8 @@ package xfn
 
 import (
 	"context"
+	"maps"
+	"sort"
 
 	"google.golang.org/protobuf/proto"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -66,6 +68,9 @@ func (c *FetchingFunctionRunner) RunFunction(ctx context.Context, name string, r
 	// Used to store the requirements returned at the previous iteration.
 	var requirements *fnv1.Requirements
 
+	// Preserve bootstrap required resources from the initial request.
+	bootstrap := maps.Clone(req.GetRequiredResources())
+
 	for i := int64(0); i <= MaxRequirementsIterations; i++ {
 		rsp, err := c.wrapped.RunFunction(ctx, name, req)
 		if err != nil {
@@ -89,9 +94,12 @@ func (c *FetchingFunctionRunner) RunFunction(ctx context.Context, name string, r
 		// Store the requirements for the next iteration.
 		requirements = newRequirements
 
-		// Clean up the required resources from the previous iteration to store the new ones
+		// Clean up resources from the previous iteration to store the new ones.
 		req.ExtraResources = make(map[string]*fnv1.Resources) //nolint:staticcheck // Supporting deprecated field for backward compatibility
-		req.RequiredResources = make(map[string]*fnv1.Resources)
+		req.RequiredResources = maps.Clone(bootstrap)
+		if req.RequiredResources == nil {
+			req.RequiredResources = make(map[string]*fnv1.Resources)
+		}
 
 		// Fetch the requested resources and add them to the desired state.
 		// Support both old (extra_resources) and new (resources) field names.
@@ -174,7 +182,13 @@ func (e *ExistingRequiredResourcesFetcher) Fetch(ctx context.Context, rs *fnv1.R
 			return nil, errors.Wrap(err, "cannot list required resources")
 		}
 
+		// Sort items by resource name so that the order is stable across calls.
+		sort.Slice(list.Items, func(i, j int) bool {
+			return list.Items[i].GetName() < list.Items[j].GetName()
+		})
+
 		resources := make([]*fnv1.Resource, len(list.Items))
+
 		for i, r := range list.Items {
 			o, err := AsStruct(&r)
 			if err != nil {

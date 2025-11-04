@@ -38,7 +38,6 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
-	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 
 	v1 "github.com/crossplane/crossplane/v2/apis/pkg/v1"
@@ -77,7 +76,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		Owns(&rbacv1.ClusterRoleBinding{}).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &v1.ProviderRevision{})).
 		WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(r), o.GlobalRateLimiter))
+		Complete(errors.WithSilentRequeueOnConflict(r))
 }
 
 // ReconcilerOption is used to configure the Reconciler.
@@ -220,7 +219,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		"subjects", subjects,
 	)
 
-	err := r.client.Apply(ctx, rb, resource.MustBeControllableBy(pr.GetUID()), resource.AllowUpdateIf(ClusterRoleBindingsDiffer))
+	err := r.client.Applicator.Apply(ctx, rb, resource.MustBeControllableBy(pr.GetUID()), resource.AllowUpdateIf(ClusterRoleBindingsDiffer))
 	if resource.IsNotAllowed(err) {
 		log.Debug("Skipped no-op ClusterRoleBinding apply")
 		return reconcile.Result{}, nil

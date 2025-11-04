@@ -41,7 +41,6 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
-	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 
 	v1 "github.com/crossplane/crossplane/v2/apis/apiextensions/v1"
@@ -68,6 +67,7 @@ const (
 	errStartController = "cannot start composite resource claim controller"
 	errStopController  = "cannot stop composite resource claim controller"
 	errStartWatches    = "cannot start composite resource claim controller watches"
+	errAddIndex        = "cannot add composite resource claim index"
 	errAddFinalizer    = "cannot add composite resource claim finalizer"
 	errRemoveFinalizer = "cannot remove composite resource claim finalizer"
 	errDeleteCRD       = "cannot delete composite resource claim CustomResourceDefinition"
@@ -89,12 +89,15 @@ const (
 )
 
 // A ControllerEngine can start and stop Kubernetes controllers on demand.
+//
+//nolint:interfacebloat // This interface is internal and the methods are all necessary for controller management
 type ControllerEngine interface {
 	Start(name string, o ...engine.ControllerOption) error
 	Stop(ctx context.Context, name string) error
 	IsRunning(name string) bool
 	StartWatches(ctx context.Context, name string, ws ...engine.Watch) error
 	GetCached() client.Client
+	GetFieldIndexer() client.FieldIndexer
 }
 
 // A NopEngine does nothing.
@@ -155,7 +158,7 @@ func Setup(mgr ctrl.Manager, o apiextensionscontroller.Options) error {
 		For(&v1.CompositeResourceDefinition{}, builder.WithPredicates(resource.NewPredicates(OffersClaim()))).
 		Owns(&extv1.CustomResourceDefinition{}, builder.WithPredicates(resource.NewPredicates(IsClaimCRD()))).
 		WithOptions(o.ForControllerRuntime()).
-		Complete(ratelimiter.NewReconciler(name, errors.WithSilentRequeueOnConflict(r), o.GlobalRateLimiter))
+		Complete(errors.WithSilentRequeueOnConflict(r))
 }
 
 // ReconcilerOption is used to configure the Reconciler.
@@ -221,7 +224,7 @@ func NewReconciler(ca resource.ClientApplicator, opts ...ReconcilerOption) *Reco
 
 		claim: definition{
 			CRDRenderer: CRDRenderFn(xcrd.ForCompositeResourceClaim),
-			Finalizer:   resource.NewAPIFinalizer(ca, finalizer),
+			Finalizer:   resource.NewAPIFinalizer(ca.Client, finalizer),
 		},
 
 		engine: &NopEngine{},
@@ -432,7 +435,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 
 	origRV := ""
-	if err := r.client.Apply(ctx, crd, resource.MustBeControllableBy(d.GetUID()), resource.StoreCurrentRV(&origRV)); err != nil {
+	if err := r.client.Applicator.Apply(ctx, crd, resource.MustBeControllableBy(d.GetUID()), resource.StoreCurrentRV(&origRV)); err != nil {
 		if kerrors.IsConflict(err) {
 			return reconcile.Result{Requeue: true}, nil
 		}
@@ -493,10 +496,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{Requeue: false}, errors.Wrap(r.client.Status().Update(ctx, d), errUpdateStatus)
 	}
 
+	// Add an index to the controller engine's client.
+	if indexer := r.engine.GetFieldIndexer(); indexer != nil {
+		if err := indexer.IndexField(ctx, &v1.CompositeResourceDefinition{}, claim.XRDByCompositeGVKIndex(), claim.IndexXRDByCompositeGVK()); err != nil {
+			log.Debug(errAddIndex, "error", err)
+		}
+	}
+
 	cr := claim.NewReconciler(r.engine.GetCached(), d.GetClaimGroupVersionKind(), d.GetCompositeGroupVersionKind(), o...)
 
 	ko := r.options.ForControllerRuntime()
-	ko.Reconciler = ratelimiter.NewReconciler(claim.ControllerName(d.GetName()), errors.WithSilentRequeueOnConflict(cr), r.options.GlobalRateLimiter)
+	ko.Reconciler = errors.WithSilentRequeueOnConflict(cr)
 
 	if err := r.engine.Start(claim.ControllerName(d.GetName()), engine.WithRuntimeOptions(ko)); err != nil {
 		err = errors.Wrap(err, errStartController)

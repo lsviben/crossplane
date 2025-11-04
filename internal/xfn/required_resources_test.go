@@ -167,6 +167,84 @@ func TestExistingRequiredResourcesFetcherFetch(t *testing.T) {
 				},
 			},
 		},
+		"SuccessMatchLabelsSortedByName": {
+			reason: "We should resources sorted by name when multiple resources are found by labels",
+			args: args{
+				rs: &fnv1.ResourceSelector{
+					ApiVersion: "test.crossplane.io/v1",
+					Kind:       "Foo",
+					Match: &fnv1.ResourceSelector_MatchLabels{
+						MatchLabels: &fnv1.MatchLabels{
+							Labels: map[string]string{
+								"cool": "resource",
+							},
+						},
+					},
+					Namespace: ptr.To("default"),
+				},
+				c: &test.MockClient{
+					MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
+						obj.(*kunstructured.UnstructuredList).Items = []kunstructured.Unstructured{
+							{
+								Object: map[string]any{
+									"apiVersion": "test.crossplane.io/v1",
+									"kind":       "Foo",
+									"metadata": map[string]any{
+										"name": "b-cool-resource",
+										"labels": map[string]any{
+											"cool": "resource",
+										},
+									},
+								},
+							},
+							{
+								Object: map[string]any{
+									"apiVersion": "test.crossplane.io/v1",
+									"kind":       "Foo",
+									"metadata": map[string]any{
+										"name": "a-cool-resource",
+										"labels": map[string]any{
+											"cool": "resource",
+										},
+									},
+								},
+							},
+						}
+						return nil
+					}),
+				},
+			},
+			want: want{
+				res: &fnv1.Resources{
+					Items: []*fnv1.Resource{
+						{
+							Resource: MustStruct(map[string]any{
+								"apiVersion": "test.crossplane.io/v1",
+								"kind":       "Foo",
+								"metadata": map[string]any{
+									"name": "a-cool-resource",
+									"labels": map[string]any{
+										"cool": "resource",
+									},
+								},
+							}),
+						},
+						{
+							Resource: MustStruct(map[string]any{
+								"apiVersion": "test.crossplane.io/v1",
+								"kind":       "Foo",
+								"metadata": map[string]any{
+									"name": "b-cool-resource",
+									"labels": map[string]any{
+										"cool": "resource",
+									},
+								},
+							}),
+						},
+					},
+				},
+			},
+		},
 		"NotFoundMatchName": {
 			reason: "We should return no error when a resource is not found by name",
 			args: args{
@@ -287,7 +365,9 @@ func TestFetchingFunctionRunner(t *testing.T) {
 					return nil, errors.New("boom")
 				}),
 			},
-			args: args{},
+			args: args{
+				req: &fnv1.RunFunctionRequest{},
+			},
 			want: want{
 				err: cmpopts.AnyError,
 			},
@@ -306,7 +386,9 @@ func TestFetchingFunctionRunner(t *testing.T) {
 					return rsp, nil
 				}),
 			},
-			args: args{},
+			args: args{
+				req: &fnv1.RunFunctionRequest{},
+			},
 			want: want{
 				rsp: &fnv1.RunFunctionResponse{
 					Results: []*fnv1.Result{
@@ -332,7 +414,9 @@ func TestFetchingFunctionRunner(t *testing.T) {
 					return rsp, nil
 				}),
 			},
-			args: args{},
+			args: args{
+				req: &fnv1.RunFunctionRequest{},
+			},
 			want: want{
 				rsp: &fnv1.RunFunctionResponse{
 					Results: []*fnv1.Result{
@@ -452,6 +536,94 @@ func TestFetchingFunctionRunner(t *testing.T) {
 							"gimme": {
 								ApiVersion: "test.crossplane.io/v1",
 								Kind:       "CoolResource",
+							},
+						},
+					},
+				},
+			},
+		},
+		"PreserveBootstrapResourcesWithDynamicRequirements": {
+			reason: "We should preserve bootstrap resources when functions set dynamic requirements",
+			params: params{
+				wrapped: FunctionRunnerFn(func(_ context.Context, _ string, req *fnv1.RunFunctionRequest) (*fnv1.RunFunctionResponse, error) {
+					// First call - check we have bootstrap resources and set dynamic requirements
+					if len(req.GetRequiredResources()) == 1 {
+						if _, exists := req.GetRequiredResources()["bootstrap-cm"]; !exists {
+							return nil, errors.New("bootstrap resource missing on first call")
+						}
+
+						// Set dynamic requirements - this triggers the bug path
+						rsp := &fnv1.RunFunctionResponse{
+							Requirements: &fnv1.Requirements{
+								Resources: map[string]*fnv1.ResourceSelector{
+									"dynamic-secret": {
+										ApiVersion: "v1",
+										Kind:       "Secret",
+										Match: &fnv1.ResourceSelector_MatchName{
+											MatchName: "dynamic-secret",
+										},
+									},
+								},
+							},
+						}
+						return rsp, nil
+					}
+
+					// Second call - verify we still have bootstrap AND dynamic resources
+					if len(req.GetRequiredResources()) != 2 {
+						return nil, errors.Errorf("expected 2 required resources, got %d", len(req.GetRequiredResources()))
+					}
+
+					if _, exists := req.GetRequiredResources()["bootstrap-cm"]; !exists {
+						return nil, errors.New("bootstrap resource lost after setting dynamic requirements")
+					}
+
+					if _, exists := req.GetRequiredResources()["dynamic-secret"]; !exists {
+						return nil, errors.New("dynamic resource not found")
+					}
+
+					// Requirements are stable now
+					return &fnv1.RunFunctionResponse{
+						Requirements: &fnv1.Requirements{
+							Resources: map[string]*fnv1.ResourceSelector{
+								"dynamic-secret": {
+									ApiVersion: "v1",
+									Kind:       "Secret",
+									Match: &fnv1.ResourceSelector_MatchName{
+										MatchName: "dynamic-secret",
+									},
+								},
+							},
+						},
+					}, nil
+				}),
+				resources: RequiredResourcesFetcherFn(func(_ context.Context, _ *fnv1.ResourceSelector) (*fnv1.Resources, error) {
+					// Return mock resources for dynamic requirements
+					return &fnv1.Resources{
+						Items: []*fnv1.Resource{{Resource: coolResource}},
+					}, nil
+				}),
+			},
+			args: args{
+				req: &fnv1.RunFunctionRequest{
+					// Start with bootstrap resources
+					RequiredResources: map[string]*fnv1.Resources{
+						"bootstrap-cm": {
+							Items: []*fnv1.Resource{{Resource: coolResource}},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Requirements: &fnv1.Requirements{
+						Resources: map[string]*fnv1.ResourceSelector{
+							"dynamic-secret": {
+								ApiVersion: "v1",
+								Kind:       "Secret",
+								Match: &fnv1.ResourceSelector_MatchName{
+									MatchName: "dynamic-secret",
+								},
 							},
 						},
 					},
