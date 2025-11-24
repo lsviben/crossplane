@@ -29,6 +29,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/spf13/afero"
 	corev1 "k8s.io/api/core/v1"
+	kmeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	kcache "k8s.io/client-go/tools/cache"
@@ -44,6 +45,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/certificates"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/feature"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource/unstructured"
@@ -106,6 +108,10 @@ type startCommand struct {
 	MaxConcurrentReconciles          int           `aliases:"max-reconcile-rate" default:"100"                                                                                            help:"The maximum number of concurrent reconcile operations (worker pool size)."`
 	MaxConcurrentPackageEstablishers int           `default:"10"                 help:"The maximum number of goroutines to use for establishing Providers, Configurations and Functions."`
 
+	CircuitBreakerBurst      float64       `default:"100.0" help:"XR circuit breaker token bucket capacity."`
+	CircuitBreakerRefillRate float64       `default:"1.0"   help:"XR circuit breaker token refill rate (tokens/second)."`
+	CircuitBreakerCooldown   time.Duration `default:"5m"    help:"How long XR circuit breakers stay open after triggering."`
+
 	EnableWebhooks bool `aliases:"webhook-enabled" default:"true" env:"ENABLE_WEBHOOKS,WEBHOOK_ENABLED" help:"Enable webhook configuration."`
 
 	WebhookPort     int `default:"9443" env:"WEBHOOK_PORT"      help:"The port the webhook server listens on."`
@@ -131,6 +137,8 @@ type startCommand struct {
 	EnableSSAClaims                         bool `default:"true" group:"Beta Features:" help:"Enable support for using Kubernetes server-side apply to sync claims with composite resources (XRs)."`
 	EnableRealtimeCompositions              bool `default:"true" group:"Beta Features:" help:"Enable support for realtime compositions, i.e. watching composed resources and reconciling compositions immediately when any of the composed resources is updated."`
 	EnableCustomToManagedResourceConversion bool `default:"true" group:"Beta Features:" help:"Enable support CRD to MRD conversion when installing a package."`
+
+	RestrictNamespacedEvents bool `default:"false" help:"Prevent events from being produced on resources that are not namespaced. Useful when crossplane does not have permissions in the default namespace."`
 
 	// These are features that we've removed support for. Crossplane returns an
 	// error when you enable them. This ensures you'll see an explicit and
@@ -227,11 +235,22 @@ func (c *startCommand) Run(s *runtime.Scheme, log logging.Logger) error { //noli
 	})
 	defer eb.Shutdown()
 
+	eventFilterFns := []event.FilterFn{}
+	// If the option to restrict event emission to namespaced resources if active,
+	// we create a filter function accordingly
+	if c.RestrictNamespacedEvents {
+		eventFilterFns = append(eventFilterFns, func(obj runtime.Object, _ event.Event) bool {
+			m, err := kmeta.Accessor(obj)
+			return (err == nil && m.GetNamespace() != "" && m.GetNamespace() != "default")
+		})
+	}
+
 	o := controller.Options{
 		Logger:                  log,
 		MaxConcurrentReconciles: c.MaxConcurrentReconciles,
 		PollInterval:            c.PollInterval,
 		Features:                &feature.Flags{},
+		EventFilterFunctions:    eventFilterFns,
 	}
 
 	clienttls, err := certificates.LoadMTLSConfig(
@@ -427,10 +446,13 @@ func (c *startCommand) Run(s *runtime.Scheme, log logging.Logger) error { //noli
 	metrics.Registry.MustRegister(cbm)
 
 	ao := apiextensionscontroller.Options{
-		Options:               o,
-		ControllerEngine:      ce,
-		FunctionRunner:        runner,
-		CircuitBreakerMetrics: cbm,
+		Options:                  o,
+		ControllerEngine:         ce,
+		FunctionRunner:           runner,
+		CircuitBreakerMetrics:    cbm,
+		CircuitBreakerBurst:      c.CircuitBreakerBurst,
+		CircuitBreakerRefillRate: c.CircuitBreakerRefillRate,
+		CircuitBreakerCooldown:   c.CircuitBreakerCooldown,
 	}
 
 	if err := apiextensions.Setup(mgr, ao); err != nil {
