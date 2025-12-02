@@ -17,7 +17,8 @@ limitations under the License.
 package runtime
 
 import (
-	"golang.org/x/net/context"
+	"context"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -84,6 +85,8 @@ var (
 	Privileged = false
 	// RunAsNonRoot indicates whether containers must run as non-root user.
 	RunAsNonRoot = true
+	// AppProtocolTLS is the application protocol for TLS.
+	AppProtocolTLS = "tls"
 )
 
 // ManifestBuilder builds the runtime manifests for a package revision.
