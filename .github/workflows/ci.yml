@@ -15,7 +15,6 @@ env:
   # 'if env.FOO' != ""', so we copy secrets to env vars for conditional checks.
   DOCKER_USR: ${{ secrets.DOCKER_USR }}
   UPBOUND_MARKETPLACE_PUSH_ROBOT_USR: ${{ secrets.UPBOUND_MARKETPLACE_PUSH_ROBOT_USR }}
-  AWS_USR: ${{ secrets.AWS_USR }}
 
 jobs:
   check-diff:
@@ -273,30 +272,6 @@ jobs:
       - name: Push Images to Upbound
         if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v2' || startsWith(github.ref, 'refs/heads/release-')) && env.UPBOUND_MARKETPLACE_PUSH_ROBOT_USR != ''
         run: nix run --option warn-dirty false .#push-images -- xpkg.upbound.io/upbound/crossplane
-
-      - name: Push Artifacts to S3
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v2' || startsWith(github.ref, 'refs/heads/release-')) && env.AWS_USR != ''
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_USR }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_PSW }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: nix run --option warn-dirty false .#push-artifacts -- "${GITHUB_REF##*/}"
-
-      - name: Promote Artifacts to Master Channel
-        if: github.ref == 'refs/heads/main' && env.AWS_USR != ''
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_USR }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_PSW }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: nix run --option warn-dirty false .#promote-artifacts -- main "$VERSION" master
-
-      - name: Promote Artifacts to Preview Channel
-        if: github.ref == 'refs/heads/v2' && env.AWS_USR != ''
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_USR }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_PSW }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: nix run --option warn-dirty false .#promote-artifacts -- "${GITHUB_REF##*/}" "$VERSION" preview
 
   # Security scanning (unchanged from original)
   trivy-scan-fs:

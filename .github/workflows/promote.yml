@@ -18,7 +18,6 @@ on:
 
 env:
   DOCKER_USR: ${{ secrets.DOCKER_USR }}
-  AWS_USR: ${{ secrets.AWS_USR }}
   UPBOUND_MARKETPLACE_PUSH_ROBOT_USR: ${{ secrets.UPBOUND_MARKETPLACE_PUSH_ROBOT_USR }}
 
 jobs:
@@ -60,16 +59,3 @@ jobs:
       - name: Promote Images to Upbound
         if: env.UPBOUND_MARKETPLACE_PUSH_ROBOT_USR != ''
         run: nix run .#promote-images -- xpkg.upbound.io/upbound/crossplane ${{ inputs.version }} ${{ inputs.channel }}
-
-      - name: Promote Artifacts to S3
-        if: env.AWS_USR != ''
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_USR }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_PSW }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: |
-          PRERELEASE_FLAG=""
-          if [ "${{ inputs.pre-release }}" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
-          nix run .#promote-artifacts -- "${GITHUB_REF##*/}" ${{ inputs.version }} ${{ inputs.channel }} $PRERELEASE_FLAG
