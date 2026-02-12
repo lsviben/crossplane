@@ -91,7 +91,7 @@ jobs:
       matrix:
         release: ${{ fromJSON(needs.generate-matrix.outputs.supported_releases) }}
         image:
-          - crossplane/crossplane
+          - upbound/crossplane
 
     runs-on: ubuntu-latest
     steps:
@@ -133,4 +133,3 @@ jobs:
         with:
           sarif_file: 'trivy-results.sarif'
           category: ${{ matrix.image }}:${{ env.tag }}
-

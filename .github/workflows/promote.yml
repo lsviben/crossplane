@@ -10,11 +10,6 @@ on:
         description: 'Release channel'
         required: true
         default: 'stable'
-      pre-release:
-        type: boolean
-        description: 'This is a pre-release (will not update current pointer)'
-        required: true
-        default: false
 
 env:
   DOCKER_USR: ${{ secrets.DOCKER_USR }}
