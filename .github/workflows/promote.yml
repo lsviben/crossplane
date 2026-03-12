@@ -11,12 +11,18 @@ on:
         required: true
         default: 'stable'
 
+permissions:
+  contents: read
+
 env:
   DOCKER_USR: ${{ secrets.DOCKER_USR }}
   UPBOUND_MARKETPLACE_PUSH_ROBOT_USR: ${{ secrets.UPBOUND_MARKETPLACE_PUSH_ROBOT_USR }}
 
 jobs:
   promote:
+    permissions:
+      contents: read
+      packages: write  # for pushing to ghcr.io
     runs-on: ubuntu-24.04
 
     steps:
