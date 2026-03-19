@@ -250,11 +250,16 @@ func (c *startCommand) Run(s *runtime.Scheme, log logging.Logger) error { //noli
 	pfrm := xfn.NewPrometheusMetrics()
 	metrics.Registry.MustRegister(pfrm)
 
+	ppsm := xfn.NewPrometheusPayloadMetrics()
+	metrics.Registry.MustRegister(ppsm)
+
 	// We want all XR controllers to share the same gRPC clients.
+	// NOTE(phisco): Keep fork-local payload size metrics in a separate
+	// interceptor so upstream RED metrics can stay untouched during syncs.
 	pfr := xfn.NewPackagedFunctionRunner(mgr.GetClient(),
 		xfn.WithLogger(log),
 		xfn.WithTLSConfig(clienttls),
-		xfn.WithInterceptorCreators(pfrm),
+		xfn.WithInterceptorCreators(pfrm, ppsm),
 	)
 
 	// Periodically remove clients for Functions that no longer exist.
