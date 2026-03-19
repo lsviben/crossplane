@@ -137,21 +137,15 @@ func TestPrometheusPayloadMetricsCreateInterceptor(t *testing.T) {
 			families := gatherMetricFamilies(t, registry)
 
 			if diff := cmp.Diff(tc.want.requestBytes, counterValue(t, families, "function_run_function_request_bytes_total", map[string]string{
-				"function_name":    "test-function",
 				"function_package": "xpkg.crossplane.io/test-function:v1.0.0",
-				"grpc_target":      conn.Target(),
 				"grpc_method":      tc.args.method,
-				"grpc_code":        metricCodeForCase(name),
 			})); diff != "" {
 				t.Errorf("\n%s\nrequest bytes: -want, +got:\n%s", tc.reason, diff)
 			}
 
 			if diff := cmp.Diff(tc.want.responseBytes, counterValue(t, families, "function_run_function_response_bytes_total", map[string]string{
-				"function_name":    "test-function",
 				"function_package": "xpkg.crossplane.io/test-function:v1.0.0",
-				"grpc_target":      conn.Target(),
 				"grpc_method":      tc.args.method,
-				"grpc_code":        metricCodeForCase(name),
 			})); diff != "" {
 				t.Errorf("\n%s\nresponse bytes: -want, +got:\n%s", tc.reason, diff)
 			}
@@ -349,7 +343,7 @@ func TestNewPrometheusPayloadMetrics(t *testing.T) {
 			reason: "Request size histogram should expose the expected label set and fixed bucket boundaries.",
 			want: want{
 				metricType: dto.MetricType_HISTOGRAM,
-				labels:     []string{"function_name", "function_package", "grpc_target", "grpc_method", "grpc_code"},
+				labels:     []string{"function_package", "grpc_method"},
 				buckets:    payloadSizeBuckets(),
 			},
 		},
@@ -357,14 +351,14 @@ func TestNewPrometheusPayloadMetrics(t *testing.T) {
 			reason: "Request byte counters should expose the expected label set.",
 			want: want{
 				metricType: dto.MetricType_COUNTER,
-				labels:     []string{"function_name", "function_package", "grpc_target", "grpc_method", "grpc_code"},
+				labels:     []string{"function_package", "grpc_method"},
 			},
 		},
 		"ResponseSizeHistogram": {
 			reason: "Response size histogram should expose the expected label set and fixed bucket boundaries.",
 			want: want{
 				metricType: dto.MetricType_HISTOGRAM,
-				labels:     []string{"function_name", "function_package", "grpc_target", "grpc_method", "grpc_code"},
+				labels:     []string{"function_package", "grpc_method"},
 				buckets:    payloadSizeBuckets(),
 			},
 		},
@@ -372,7 +366,7 @@ func TestNewPrometheusPayloadMetrics(t *testing.T) {
 			reason: "Response byte counters should expose the expected label set.",
 			want: want{
 				metricType: dto.MetricType_COUNTER,
-				labels:     []string{"function_name", "function_package", "grpc_target", "grpc_method", "grpc_code"},
+				labels:     []string{"function_package", "grpc_method"},
 			},
 		},
 	}
@@ -490,15 +484,6 @@ func labelMap(metric *dto.Metric) map[string]string {
 	}
 
 	return out
-}
-
-func metricCodeForCase(name string) string {
-	switch name {
-	case "TerminalRPCError":
-		return codes.Unavailable.String()
-	default:
-		return codes.OK.String()
-	}
 }
 
 func sortedStrings(in []string) []string {

@@ -20,7 +20,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -39,7 +38,7 @@ type PrometheusPayloadMetrics struct {
 
 // NewPrometheusPayloadMetrics creates metrics for RunFunction payload sizes.
 func NewPrometheusPayloadMetrics() *PrometheusPayloadMetrics {
-	labels := []string{"function_name", "function_package", "grpc_target", "grpc_method", "grpc_code"}
+	labels := []string{"function_package", "grpc_method"}
 
 	return &PrometheusPayloadMetrics{
 		requestSize: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -92,17 +91,13 @@ func (m *PrometheusPayloadMetrics) Collect(ch chan<- prometheus.Metric) {
 
 // CreateInterceptor returns a gRPC UnaryClientInterceptor for the named
 // function. The supplied package (pkg) should be the package's OCI reference.
-func (m *PrometheusPayloadMetrics) CreateInterceptor(name, pkg string) grpc.UnaryClientInterceptor {
+func (m *PrometheusPayloadMetrics) CreateInterceptor(_ string, pkg string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		err := invoker(ctx, method, req, reply, cc, opts...)
 
-		s, _ := status.FromError(err)
 		l := prometheus.Labels{
-			"function_name":    name,
 			"function_package": pkg,
-			"grpc_target":      cc.Target(),
 			"grpc_method":      method,
-			"grpc_code":        s.Code().String(),
 		}
 
 		if msg, ok := req.(proto.Message); ok {
