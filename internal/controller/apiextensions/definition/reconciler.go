@@ -185,7 +185,7 @@ func Setup(mgr ctrl.Manager, o apiextensionscontroller.Options) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
 		For(&v1.CompositeResourceDefinition{}).
-		Owns(&extv1.CustomResourceDefinition{}, builder.WithPredicates(resource.NewPredicates(IsCompositeResourceCRD()))).
+		Owns(&extv1.CustomResourceDefinition{}, builder.WithPredicates(resource.NewPredicates(IsCompositeResourceCRD()))). //nolint:staticcheck // SA1019: resource.NewPredicates is deprecated; already migrated on main.
 		WithOptions(o.ForControllerRuntime()).
 		Complete(errors.WithSilentRequeueOnConflict(r))
 }
@@ -536,7 +536,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		composite.WithCompositeSchema(schema),
 		composite.WithCompositionSelector(composite.NewCompositionSelectorChain(
 			composite.NewEnforcedCompositionSelector(r.client.Client, corev1.ObjectReference{Name: d.Name}, r.record),
-			composite.NewAPIDefaultCompositionSelector(r.engine.GetCached(), *meta.ReferenceTo(d, v1.CompositeResourceDefinitionGroupVersionKind), r.record),
+			composite.NewAPIDefaultCompositionSelector(r.engine.GetCached(), *meta.ReferenceTo(d, v1.CompositeResourceDefinitionGroupVersionKind), r.record), //nolint:staticcheck // SA1019: meta.ReferenceTo is deprecated; already migrated on main.
 			composite.NewAPILabelSelectorResolver(r.engine.GetCached()),
 		)),
 		composite.WithLogger(r.log.WithValues("controller", controllerName)),
@@ -622,7 +622,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	crmf := CompositionRevisionMapFunc(gvk, schema, r.engine.GetCached(), log)
 	crh := handler.EnqueueRequestsFromMapFunc(circuit.NewMapFunc(crmf, cb))
 
-	h := handler.EnqueueRequestsFromMapFunc(circuit.NewMapFunc(SelfMapFunc(), cb))
+	h := handler.EnqueueRequestsFromMapFunc(circuit.NewMapFunc(circuit.NewSelfDeleteResetMapFunc(SelfMapFunc(), cb), cb))
 
 	// StartWatches is idempotent - it only starts watches that don't already
 	// exist. We call it every reconcile to ensure watches are started, even if
