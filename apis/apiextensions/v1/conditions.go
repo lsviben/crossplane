@@ -18,6 +18,7 @@ package v1
 
 import (
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +42,10 @@ const (
 
 	// A TypeResponsive indicates whether the resource is responsive to changes.
 	TypeResponsive xpv2.ConditionType = "Responsive"
+
+	// A TypeDeletionOrdered XR's function pipeline controls the order its
+	// composed resources are deleted when the XR is deleted.
+	TypeDeletionOrdered xpv2.ConditionType = "DeletionOrdered"
 )
 
 // Reasons a resource is or is not established or offered.
@@ -56,6 +61,9 @@ const (
 
 	ReasonWatchCircuitOpen   xpv2.ConditionReason = "WatchCircuitOpen"
 	ReasonWatchCircuitClosed xpv2.ConditionReason = "WatchCircuitClosed"
+
+	ReasonFunctionsHandleDeletion xpv2.ConditionReason = "FunctionsHandleDeletion"
+	ReasonFunctionsIgnoreDeletion xpv2.ConditionReason = "FunctionsIgnoreDeletion"
 )
 
 // WatchingComposite indicates that Crossplane has defined and is watching for a
@@ -146,6 +154,42 @@ func WatchCircuitClosed() xpv2.Condition {
 	}
 }
 
+// DeletionOrdered indicates that every function in the XR's pipeline handles
+// deletion, so the pipeline will control the order the XR's composed resources
+// are deleted when the XR is deleted.
+//
+// A composed resource with this condition deletes itself in order, so whatever
+// composes it must not delete it with foreground propagation - that would make
+// Kubernetes garbage collection delete the resource's own composed resources
+// concurrently, fighting its pipeline.
+func DeletionOrdered() xpv2.Condition {
+	return xpv2.Condition{
+		Type:               TypeDeletionOrdered,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonFunctionsHandleDeletion,
+	}
+}
+
+// DeletionUnordered indicates that one or more functions in the XR's pipeline
+// don't handle deletion, so Crossplane will defer to Kubernetes garbage
+// collection - which deletes the XR's composed resources in no particular order
+// - when the XR is deleted.
+func DeletionUnordered(steps []string) xpv2.Condition {
+	c := xpv2.Condition{
+		Type:               TypeDeletionOrdered,
+		Status:             corev1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonFunctionsIgnoreDeletion,
+	}
+
+	if len(steps) > 0 {
+		c.Message = fmt.Sprintf("Pipeline steps that don't handle deletion: %s", strings.Join(steps, ", "))
+	}
+
+	return c
+}
+
 // IsSystemConditionType returns true if the condition type is a system
 // condition. This includes both core system conditions and
 // apiextensions-specific system conditions like the circuit breaker.
@@ -156,5 +200,5 @@ func IsSystemConditionType(t xpv2.ConditionType) bool {
 	}
 
 	// Then check Crossplane-specific system conditions
-	return t == TypeResponsive
+	return t == TypeResponsive || t == TypeDeletionOrdered
 }

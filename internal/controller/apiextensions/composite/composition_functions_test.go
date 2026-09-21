@@ -698,7 +698,8 @@ func TestFunctionCompose(t *testing.T) {
 			},
 			want: want{
 				res: CompositionResult{
-					Composed: []ComposedResource{{ResourceName: "ns-resource", Ready: false, Synced: true}},
+					IncapableSteps: []string{"run-cool-function"},
+					Composed:       []ComposedResource{{ResourceName: "ns-resource", Ready: false, Synced: true}},
 				},
 			},
 		},
@@ -762,7 +763,8 @@ func TestFunctionCompose(t *testing.T) {
 			},
 			want: want{
 				res: CompositionResult{
-					Composed: []ComposedResource{{ResourceName: "ns-resource", Ready: false, Synced: true}},
+					IncapableSteps: []string{"run-cool-function"},
+					Composed:       []ComposedResource{{ResourceName: "ns-resource", Ready: false, Synced: true}},
 					Events: []TargetedEvent{
 						{
 							Event: event.Event{
@@ -836,7 +838,8 @@ func TestFunctionCompose(t *testing.T) {
 			},
 			want: want{
 				res: CompositionResult{
-					Composed: []ComposedResource{{ResourceName: "ns-resource", Ready: false, Synced: true}},
+					IncapableSteps: []string{"run-cool-function"},
+					Composed:       []ComposedResource{{ResourceName: "ns-resource", Ready: false, Synced: true}},
 				},
 			},
 		},
@@ -897,7 +900,8 @@ func TestFunctionCompose(t *testing.T) {
 			},
 			want: want{
 				res: CompositionResult{
-					Composed: []ComposedResource{{ResourceName: "cluster-resource", Ready: false, Synced: true}},
+					IncapableSteps: []string{"run-cool-function"},
+					Composed:       []ComposedResource{{ResourceName: "cluster-resource", Ready: false, Synced: true}},
 				},
 			},
 		},
@@ -1283,6 +1287,7 @@ func TestFunctionCompose(t *testing.T) {
 			},
 			want: want{
 				res: CompositionResult{
+					IncapableSteps: []string{"run-cool-function"},
 					Composed: []ComposedResource{
 						{ResourceName: "desired-resource-a", Synced: true},
 						{ResourceName: "observed-resource-a", Ready: true, Synced: true},
@@ -1348,9 +1353,219 @@ func TestFunctionCompose(t *testing.T) {
 							Target: CompositionTargetCompositeAndClaim,
 						},
 					},
-					TTL: 5 * time.Minute,
+					TTL:      5 * time.Minute,
+					Existing: 1,
 				},
 				err: nil,
+			},
+		},
+		"RetainReferencesToResourcesThatStillExist": {
+			reason: "We should keep referencing a composed resource the pipeline no longer desires until the resource is really gone, so that functions can see it's still being deleted",
+			params: params{
+				c: &test.MockClient{
+					MockGet: test.NewMockGetFn(kerrors.NewNotFound(schema.GroupResource{}, "")),
+					MockPatch: test.NewMockPatchFn(nil, func(obj client.Object) error {
+						// We only care about the patch that persists the XR's
+						// composed resource references.
+						xr, ok := obj.(*composite.Unstructured)
+						if !ok {
+							return nil
+						}
+
+						refs := xr.GetResourceReferences()
+						if len(refs) != 1 {
+							return errors.Errorf("want 1 resource reference, got %d", len(refs))
+						}
+						if refs[0].Name != "observed-resource-a" {
+							return errors.Errorf("want a reference to observed-resource-a, got %q", refs[0].Name)
+						}
+						// No resourceRefs schema has a uid field.
+						if refs[0].UID != "" {
+							return errors.Errorf("want no UID in the resource reference, got %q", refs[0].UID)
+						}
+
+						return nil
+					}),
+					MockStatusPatch: test.NewMockSubResourcePatchFn(nil),
+				},
+				r: FunctionRunnerFn(func(_ context.Context, _ string, _ *fnv1.RunFunctionRequest) (*fnv1.RunFunctionResponse, error) {
+					// A function that has stopped desiring the composed resource
+					// it used to desire, e.g. to tear it down in order.
+					return &fnv1.RunFunctionResponse{Desired: &fnv1.State{}}, nil
+				}),
+				o: []FunctionComposerOption{
+					WithFunctionControlledDeletion(true),
+					WithCompositeConnectionDetailsFetcher(ConnectionDetailsFetcherFn(func(_ context.Context, _ ConnectionSecretOwner) (managed.ConnectionDetails, error) {
+						return nil, nil
+					})),
+					WithComposedResourceObserver(ComposedResourceObserverFn(func(_ context.Context, _ resource.Composite) (ComposedResourceStates, error) {
+						// The resource still exists, and Kubernetes has begun
+						// deleting it.
+						cd := &fake.Composed{ObjectMeta: metav1.ObjectMeta{
+							Name:              "observed-resource-a",
+							UID:               "some-uid",
+							DeletionTimestamp: &metav1.Time{Time: time.Now()},
+						}}
+						return ComposedResourceStates{"observed-resource-a": ComposedResourceState{Resource: cd}}, nil
+					})),
+					WithComposedResourceGarbageCollector(ComposedResourceGarbageCollectorFn(func(_ context.Context, _ metav1.Object, _, _ ComposedResourceStates) error {
+						return nil
+					})),
+				},
+			},
+			args: args{
+				xr: composite.New(composite.WithGroupVersionKind(schema.GroupVersionKind{
+					Group:   "test.crossplane.io",
+					Version: "v1",
+					Kind:    "CoolComposite",
+				})),
+				req: CompositionRequest{
+					Revision: &v1.CompositionRevision{
+						Spec: v1.CompositionRevisionSpec{
+							Pipeline: []v1.PipelineStep{{
+								Step:        "run-cool-function",
+								FunctionRef: v1.FunctionReference{Name: "cool-function"},
+							}},
+						},
+					},
+				},
+			},
+			want: want{
+				res: CompositionResult{
+					IncapableSteps: []string{"run-cool-function"},
+					Composed:       []ComposedResource{},
+					Existing:       1,
+				},
+			},
+		},
+		"DeletingPipelineDoesNotHandleDeletion": {
+			reason: "When the XR is being deleted and any function doesn't advertise the deletion capability we should return without touching composed resources",
+			params: params{
+				// Any client call would be a side effect we don't want.
+				c: &test.MockClient{
+					MockGet:         test.NewMockGetFn(errBoom),
+					MockPatch:       test.NewMockPatchFn(errBoom),
+					MockStatusPatch: test.NewMockSubResourcePatchFn(errBoom),
+				},
+				r: FunctionRunnerFn(func(_ context.Context, _ string, _ *fnv1.RunFunctionRequest) (*fnv1.RunFunctionResponse, error) {
+					// A function that predates function-controlled deletion. It
+					// keeps returning the composed resource it always does.
+					return &fnv1.RunFunctionResponse{
+						Desired: &fnv1.State{Resources: map[string]*fnv1.Resource{
+							"observed-resource-a": {Resource: MustStruct(map[string]any{
+								"apiVersion": "test.crossplane.io/v1",
+								"kind":       "CoolComposed",
+							})},
+						}},
+					}, nil
+				}),
+				o: []FunctionComposerOption{
+					WithCompositeConnectionDetailsFetcher(ConnectionDetailsFetcherFn(func(_ context.Context, _ ConnectionSecretOwner) (managed.ConnectionDetails, error) {
+						return nil, nil
+					})),
+					WithComposedResourceObserver(ComposedResourceObserverFn(func(_ context.Context, _ resource.Composite) (ComposedResourceStates, error) {
+						return ComposedResourceStates{
+							"observed-resource-a": ComposedResourceState{
+								Resource: &fake.Composed{ObjectMeta: metav1.ObjectMeta{Name: "observed-resource-a"}},
+							},
+						}, nil
+					})),
+					WithComposedResourceGarbageCollector(ComposedResourceGarbageCollectorFn(func(_ context.Context, _ metav1.Object, _, _ ComposedResourceStates) error {
+						return errors.New("garbage collector should not be called")
+					})),
+				},
+			},
+			args: args{
+				xr: composite.New(composite.WithGroupVersionKind(schema.GroupVersionKind{
+					Group:   "test.crossplane.io",
+					Version: "v1",
+					Kind:    "CoolComposite",
+				})),
+				req: CompositionRequest{
+					Deleting: true,
+					Revision: &v1.CompositionRevision{
+						Spec: v1.CompositionRevisionSpec{
+							Pipeline: []v1.PipelineStep{{
+								Step:        "run-cool-function",
+								FunctionRef: v1.FunctionReference{Name: "cool-function"},
+							}},
+						},
+					},
+				},
+			},
+			want: want{
+				res: CompositionResult{
+					IncapableSteps:           []string{"run-cool-function"},
+					FunctionsSupportDeletion: false,
+					Existing:                 1,
+				},
+			},
+		},
+		"DeletingPipelineHandlesDeletion": {
+			reason: "When the XR is being deleted and every function advertises the deletion capability we should garbage collect the composed resources it no longer desires",
+			params: params{
+				c: &test.MockClient{
+					MockGet:         test.NewMockGetFn(kerrors.NewNotFound(schema.GroupResource{}, "")),
+					MockPatch:       test.NewMockPatchFn(nil),
+					MockStatusPatch: test.NewMockSubResourcePatchFn(nil),
+				},
+				r: FunctionRunnerFn(func(_ context.Context, _ string, _ *fnv1.RunFunctionRequest) (*fnv1.RunFunctionResponse, error) {
+					// A function that handles deletion. It saw the XR's deletion
+					// timestamp, and stopped desiring its composed resource.
+					return &fnv1.RunFunctionResponse{
+						Meta: &fnv1.ResponseMeta{Capabilities: []fnv1.FunctionCapability{
+							fnv1.FunctionCapability_FUNCTION_CAPABILITY_CAPABILITIES,
+							fnv1.FunctionCapability_FUNCTION_CAPABILITY_DELETION,
+						}},
+						Desired: &fnv1.State{},
+					}, nil
+				}),
+				o: []FunctionComposerOption{
+					WithCompositeConnectionDetailsFetcher(ConnectionDetailsFetcherFn(func(_ context.Context, _ ConnectionSecretOwner) (managed.ConnectionDetails, error) {
+						return nil, nil
+					})),
+					WithComposedResourceObserver(ComposedResourceObserverFn(func(_ context.Context, _ resource.Composite) (ComposedResourceStates, error) {
+						return ComposedResourceStates{
+							"observed-resource-a": ComposedResourceState{
+								Resource: &fake.Composed{ObjectMeta: metav1.ObjectMeta{Name: "observed-resource-a"}},
+							},
+						}, nil
+					})),
+					WithComposedResourceGarbageCollector(ComposedResourceGarbageCollectorFn(func(_ context.Context, _ metav1.Object, observed, desired ComposedResourceStates) error {
+						if _, ok := observed["observed-resource-a"]; !ok {
+							return errors.New("observed-resource-a should be observed")
+						}
+						if len(desired) != 0 {
+							return errors.New("nothing should be desired")
+						}
+						return nil
+					})),
+				},
+			},
+			args: args{
+				xr: composite.New(composite.WithGroupVersionKind(schema.GroupVersionKind{
+					Group:   "test.crossplane.io",
+					Version: "v1",
+					Kind:    "CoolComposite",
+				})),
+				req: CompositionRequest{
+					Deleting: true,
+					Revision: &v1.CompositionRevision{
+						Spec: v1.CompositionRevisionSpec{
+							Pipeline: []v1.PipelineStep{{
+								Step:        "run-cool-function",
+								FunctionRef: v1.FunctionReference{Name: "cool-function"},
+							}},
+						},
+					},
+				},
+			},
+			want: want{
+				res: CompositionResult{
+					Composed:                 []ComposedResource{},
+					FunctionsSupportDeletion: true,
+					Existing:                 1,
+				},
 			},
 		},
 		"ResourceReferencesWithoutObservedResources": {
@@ -1446,6 +1661,7 @@ func TestFunctionCompose(t *testing.T) {
 			},
 			want: want{
 				res: CompositionResult{
+					IncapableSteps: []string{"run-cool-function"},
 					Composed: []ComposedResource{
 						{ResourceName: "test-resource-with-a-super-duper-really-long-name-to-test-compaction", Synced: true},
 					},
@@ -1966,6 +2182,74 @@ func TestGarbageCollectComposedResources(t *testing.T) {
 			want: want{
 				err: nil,
 			},
+		},
+		"ForegroundDeletionByDefault": {
+			reason: "We should delete a composed resource with foreground propagation, so that a nested XR's own composed resources are deleted before it is.",
+			params: params{
+				client: &test.MockClient{
+					MockUpdate: test.NewMockUpdateFn(nil),
+					MockDelete: func(_ context.Context, _ client.Object, opts ...client.DeleteOption) error {
+						do := &client.DeleteOptions{}
+						for _, o := range opts {
+							o.ApplyToDelete(do)
+						}
+						if do.PropagationPolicy == nil || *do.PropagationPolicy != metav1.DeletePropagationForeground {
+							return errors.Errorf("want foreground propagation, got %v", do.PropagationPolicy)
+						}
+
+						return nil
+					},
+				},
+			},
+			args: args{
+				owner: &fake.Composite{ObjectMeta: metav1.ObjectMeta{UID: "cool-xr"}},
+				observed: ComposedResourceStates{
+					"undesired-resource": ComposedResourceState{Resource: &fake.Composed{
+						ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{
+							Controller: ptr.To(true),
+							UID:        "cool-xr",
+						}}},
+					}},
+				},
+			},
+			want: want{err: nil},
+		},
+		"BackgroundDeletionForResourcesThatDeleteInOrder": {
+			reason: "We should delete a composed resource that deletes its own composed resources in order with background propagation, so Kubernetes garbage collection doesn't fight its function pipeline.",
+			params: params{
+				client: &test.MockClient{
+					MockUpdate: test.NewMockUpdateFn(nil),
+					MockDelete: func(_ context.Context, _ client.Object, opts ...client.DeleteOption) error {
+						do := &client.DeleteOptions{}
+						for _, o := range opts {
+							o.ApplyToDelete(do)
+						}
+						if do.PropagationPolicy == nil || *do.PropagationPolicy != metav1.DeletePropagationBackground {
+							return errors.Errorf("want background propagation, got %v", do.PropagationPolicy)
+						}
+
+						return nil
+					},
+				},
+			},
+			args: args{
+				owner: &fake.Composite{ObjectMeta: metav1.ObjectMeta{UID: "cool-xr"}},
+				observed: ComposedResourceStates{
+					"undesired-resource": ComposedResourceState{Resource: func() *fake.Composed {
+						cd := &fake.Composed{
+							ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{
+								Controller: ptr.To(true),
+								UID:        "cool-xr",
+							}}},
+						}
+						// This composed resource is an XR whose own pipeline
+						// handles deletion.
+						cd.SetConditions(v1.DeletionOrdered())
+						return cd
+					}()},
+				},
+			},
+			want: want{err: nil},
 		},
 		"UpdateError": {
 			reason: "We should return any error encountered updating the resource with removed labels.",

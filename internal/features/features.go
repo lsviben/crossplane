@@ -53,6 +53,13 @@ const (
 	// automatically protecting Providers from deletion when they still have
 	// active managed resources. Requires EnableBetaUsages to also be enabled.
 	EnableAlphaProviderDeletionProtection feature.Flag = "EnableAlphaProviderDeletionProtection"
+
+	// EnableAlphaFunctionControlledDeletion enables alpha support for running
+	// the composition function pipeline when an XR is deleted, so functions can
+	// control the order their composed resources are deleted. See the below
+	// design for more details.
+	// https://github.com/crossplane/crossplane/blob/main/design/one-pager-function-controlled-deletion.md
+	EnableAlphaFunctionControlledDeletion feature.Flag = "EnableAlphaFunctionControlledDeletion"
 )
 
 // Beta Feature Flags.

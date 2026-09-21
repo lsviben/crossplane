@@ -108,3 +108,15 @@ func SupportedCapabilities() []fnv1.Capability {
 func RenderCapabilities() []fnv1.Capability {
 	return SupportedCapabilities()
 }
+
+// FunctionSupportsDeletion returns true if the supplied function response
+// advertises that the function handles deletion of the XR that composes it.
+func FunctionSupportsDeletion(rsp *fnv1.RunFunctionResponse) bool {
+	for _, c := range rsp.GetMeta().GetCapabilities() {
+		if c == fnv1.FunctionCapability_FUNCTION_CAPABILITY_DELETION {
+			return true
+		}
+	}
+
+	return false
+}

@@ -562,6 +562,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		composite.WithCompositeConnectionDetailsFetcher(fetcher),
 		composite.WithRequiredSchemasFetcher(xfn.NewOpenAPIRequiredSchemasFetcher(r.options.OpenAPIClient)),
 		composite.WithResourceTracker(tracker),
+		composite.WithFunctionControlledDeletion(r.options.Features.Enabled(features.EnableAlphaFunctionControlledDeletion)),
 	)
 
 	cb := circuit.NewTokenBucketBreaker(controllerName,

@@ -201,6 +201,30 @@ enum Capability {
   // OpenAPI schemas and Crossplane will return them in required_schemas. Added
   // in Crossplane v2.2.
   CAPABILITY_REQUIRED_SCHEMAS = 5;
+
+  // Crossplane runs the function pipeline when an XR is being deleted, and will
+  // honor the desired state functions return while it's being deleted. Added in
+  // Crossplane v2.5.
+  CAPABILITY_DELETION = 6;
+}
+
+// FunctionCapability indicates that a function supports a particular feature.
+// Crossplane can use these to determine whether it can rely on a function to
+// handle a particular situation.
+enum FunctionCapability {
+  FUNCTION_CAPABILITY_UNSPECIFIED = 0;
+
+  // The function advertises capabilities in ResponseMeta. If this capability is
+  // present, Crossplane knows that if another capability is absent, it's
+  // because the function doesn't support it (not because the function predates
+  // capability advertisement). Added in Crossplane v2.5.
+  FUNCTION_CAPABILITY_CAPABILITIES = 1;
+
+  // The function handles XR deletion. When the XR is being deleted the function
+  // will detect its deletion timestamp and manage the lifecycle of the XR's
+  // composed resources using desired state accordingly. Added in Crossplane
+  // v2.5.
+  FUNCTION_CAPABILITY_DELETION = 2;
 }
 
 // Requirements that must be satisfied for a function to run successfully.
@@ -275,6 +299,11 @@ message ResponseMeta {
   // the TTL expires. Crossplane may cache the response to avoid calling the
   // function again until the TTL expires.
   optional google.protobuf.Duration ttl = 2;
+
+  // Capabilities supported by this function. Crossplane may use these to
+  // determine whether it can rely on the function to handle a particular
+  // situation, e.g. deletion of an XR.
+  repeated FunctionCapability capabilities = 3;
 }
 
 // State of the XR (XR) and any resources.

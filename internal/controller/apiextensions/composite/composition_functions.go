@@ -135,6 +135,15 @@ type FunctionComposer struct {
 	resources xfn.RequiredResourcesFetcher
 	schemas   xfn.RequiredSchemasFetcher
 	tracker   dependency.Tracker
+
+	// The capabilities this build of Crossplane advertises to functions. Some
+	// capabilities are gated on a feature flag, so this isn't always the full
+	// set of capabilities Crossplane knows about.
+	capabilities []fnv1.Capability
+
+	// Whether to keep referencing composed resources that have been garbage
+	// collected, but that still exist.
+	retainReferences bool
 }
 
 type xr struct {
@@ -258,6 +267,26 @@ func WithRequiredSchemasFetcher(f xfn.RequiredSchemasFetcher) FunctionComposerOp
 	}
 }
 
+// WithFunctionControlledDeletion tells the FunctionComposer whether Crossplane
+// runs the function pipeline while an XR is being deleted.
+//
+// When it does, the composer advertises the deletion capability to the functions
+// it runs, and keeps referencing composed resources it has garbage collected
+// until they're really gone. Crossplane only observes composed resources the XR
+// references, so this is what lets a function see that a resource it stopped
+// desiring is still being deleted, and wait for it to disappear before it stops
+// desiring the next one.
+func WithFunctionControlledDeletion(enabled bool) FunctionComposerOption {
+	return func(p *FunctionComposer) {
+		if !enabled {
+			return
+		}
+
+		p.capabilities = append(p.capabilities, fnv1.Capability_CAPABILITY_DELETION)
+		p.retainReferences = true
+	}
+}
+
 // WithResourceTracker configures how the FunctionComposer records the resources
 // an XR depends on - those it composes and those its functions require - so the
 // XR controller can watch them, and so it can seed a function's request with the
@@ -288,6 +317,8 @@ func NewFunctionComposer(cached, uncached client.Client, r FunctionRunner, o ...
 		resources: xfn.NewExistingRequiredResourcesFetcher(cached),
 		schemas:   xfn.NopRequiredSchemasFetcher{},
 		tracker:   dependency.NopTracker{},
+
+		capabilities: xfn.SupportedCapabilities(),
 	}
 
 	for _, fn := range o {
@@ -347,6 +378,14 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 
 	// The Function context always starts empty.
 	fctx := &structpb.Struct{Fields: map[string]*structpb.Value{}}
+
+	// Whether every function in the pipeline advertised that it handles
+	// deletion. Crossplane can only rely on the pipeline to delete this XR's
+	// composed resources if they all do. An empty pipeline can't be relied on.
+	// We record the steps that don't, so we can tell users which functions need
+	// updating.
+	deletion := len(req.Revision.Spec.Pipeline) > 0
+	incapable := []string{}
 
 	// Get the composition name for tracing attributes.
 	compositionName := ""
@@ -448,7 +487,7 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 		// invalidate a cached response until its TTL expires. Bootstrap
 		// schemas (fetched above) are in the tag. Schemas change rarely
 		// and aren't watched, so we accept this.
-		fnreq.Meta = &fnv1.RequestMeta{Tag: Tag(fnreq), Capabilities: xfn.SupportedCapabilities()}
+		fnreq.Meta = &fnv1.RequestMeta{Tag: Tag(fnreq), Capabilities: c.capabilities}
 
 		// Add step metadata to context for use by downstream components like InspectedRunner.
 		stepCtx := step.ContextWithStepMetaForCompositions(ctx, traceID, fn.Step, int32(stepIndex), compositionName)
@@ -474,6 +513,14 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 		// for the pipeline.
 		if d := rsp.GetMeta().GetTtl().AsDuration(); d > 0 && (ttl == 0 || d < ttl) {
 			ttl = d
+		}
+
+		// One function that doesn't handle deletion is enough to make the whole
+		// pipeline untrustworthy when the XR is deleted. It would keep returning
+		// composed resources in its desired state forever.
+		if !xfn.FunctionSupportsDeletion(rsp) {
+			deletion = false
+			incapable = append(incapable, fn.Step)
 		}
 
 		// Pass the desired state returned by this Function to the next one.
@@ -538,6 +585,22 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 
 			events = append(events, e)
 		}
+	}
+
+	// If the XR is being deleted but the pipeline can't be relied on to delete
+	// its composed resources, stop here. We're about to defer to Kubernetes
+	// garbage collection, so we mustn't act on the desired state the pipeline
+	// returned - applying it could create composed resources (and external
+	// resources) moments before they're deleted.
+	if req.Deleting && !deletion {
+		return CompositionResult{
+			Events:                   events,
+			Conditions:               conditions,
+			TTL:                      ttl,
+			FunctionsSupportDeletion: false,
+			IncapableSteps:           incapable,
+			Existing:                 len(observed),
+		}, nil
 	}
 
 	// Load our desired composed resources from the Function pipeline.
@@ -638,10 +701,12 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 	// randomly generated names and hit an error applying the second one we need
 	// to know that the first one (that _was_ created) exists next time we
 	// reconcile the XR.
+	known := referenced(desired, observed, c.retainReferences)
+
 	refs := composite.New(composite.WithSchema(xr.Schema), composite.WithGroupVersionKind(xr.GroupVersionKind()))
 	refs.SetNamespace(xr.GetNamespace())
 	refs.SetName(xr.GetName())
-	UpdateResourceRefs(refs, desired)
+	UpdateResourceRefs(refs, known)
 
 	// Persist our updated composed resource references. We want this to be an
 	// atomic replace of the entire array. Note that we're relying on the status
@@ -773,8 +838,8 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 	// Record the resources this XR depends on so the controller can watch them.
 	// A resource it composes is matched by name; a resource it requires is
 	// matched by name or label.
-	composed := make([]dependency.Reference, 0, len(desired))
-	for _, cd := range desired {
+	composed := make([]dependency.Reference, 0, len(known))
+	for _, cd := range known {
 		composed = append(composed, dependency.Reference{
 			GVK:       cd.Resource.GetObjectKind().GroupVersionKind(),
 			Namespace: cd.Resource.GetNamespace(),
@@ -784,13 +849,43 @@ func (c *FunctionComposer) Compose(ctx context.Context, xr *composite.Unstructur
 	c.tracker.Track(xrKey, composed, required)
 
 	return CompositionResult{
-		Composed:          resources,
-		ConnectionDetails: d.GetComposite().GetConnectionDetails(),
-		Ready:             ready,
-		Events:            events,
-		Conditions:        conditions,
-		TTL:               ttl,
+		Composed:                 resources,
+		ConnectionDetails:        d.GetComposite().GetConnectionDetails(),
+		Ready:                    ready,
+		Events:                   events,
+		Conditions:               conditions,
+		TTL:                      ttl,
+		FunctionsSupportDeletion: deletion,
+		IncapableSteps:           incapable,
+		Existing:                 len(observed),
 	}, nil
+}
+
+// referenced returns the composed resources the XR should reference: everything
+// the function pipeline desires, plus - when retain is true - everything that
+// still exists.
+//
+// An XR's resourceRefs are how Crossplane remembers the composed resources it
+// created, so it never creates one without first persisting a reference to it.
+// Historically Crossplane dropped a reference as soon as it asked for the
+// resource to be deleted, which meant it forgot resources that still existed.
+// Retaining the reference until the resource is really gone is what lets a
+// function see that a resource it stopped desiring is still being deleted, and
+// wait for it to disappear before it stops desiring the next one.
+func referenced(desired, observed ComposedResourceStates, retain bool) ComposedResourceStates {
+	if !retain {
+		return desired
+	}
+
+	known := make(ComposedResourceStates, len(desired)+len(observed))
+	for name, cd := range observed {
+		known[name] = cd
+	}
+	for name, cd := range desired {
+		known[name] = cd
+	}
+
+	return known
 }
 
 // Tag uniquely identifies a request. Two identical requests created by the
@@ -965,10 +1060,6 @@ func (d *DeletingComposedResourceGarbageCollector) GarbageCollectComposedResourc
 		}
 	}
 
-	// Always use foreground deletion.  There is no impact on Managed Resources,
-	// and nested XRs will be deleted "bottom up".
-	do := &client.DeleteOptions{}
-	client.PropagationPolicy(metav1.DeletePropagationForeground).ApplyToDelete(do)
 	for name, cd := range del {
 		// Only garbage collect composed resources that we actually control.
 		//
@@ -999,6 +1090,24 @@ func (d *DeletingComposedResourceGarbageCollector) GarbageCollectComposedResourc
 		if err := d.client.Update(ctx, cd.Resource); resource.IgnoreNotFound(err) != nil {
 			return errors.Wrapf(err, errFmtCleanupLabelsCD, name, cd.Resource.GetObjectKind().GroupVersionKind().Kind, cd.Resource.GetName())
 		}
+		// Default to foreground deletion. There's no impact on managed
+		// resources, which are leaves, and it makes a nested XR's own composed
+		// resources delete "bottom up".
+		//
+		// A composed resource that reports DeletionOrdered deletes its own
+		// composed resources in an order its function pipeline chooses, and
+		// holds a finalizer until it's done. Foreground deletion would make
+		// Kubernetes garbage collection delete those resources concurrently,
+		// fighting the pipeline, so we let Kubernetes clean up after the
+		// resource is gone instead.
+		policy := metav1.DeletePropagationForeground
+		if cd.Resource.GetCondition(v1.TypeDeletionOrdered).Status == corev1.ConditionTrue {
+			policy = metav1.DeletePropagationBackground
+		}
+
+		do := &client.DeleteOptions{}
+		client.PropagationPolicy(policy).ApplyToDelete(do)
+
 		if uid := cd.Resource.GetUID(); uid != "" {
 			do.Preconditions = &metav1.Preconditions{UID: &uid}
 		}
@@ -1020,6 +1129,11 @@ func UpdateResourceRefs(xr resource.Composite, desired ComposedResourceStates) {
 	for _, dr := range desired {
 		//nolint:staticcheck // TODO(adamwg) Stop using meta.ReferenceTo after the v2.2 release.
 		ref := meta.ReferenceTo(dr.Resource, dr.Resource.GetObjectKind().GroupVersionKind())
+
+		// No resourceRefs schema declares a uid field, so including one makes
+		// our fully specified intent invalid. An observed resource knows its
+		// UID; a desired resource doesn't.
+		ref.UID = ""
 
 		// If the XR is namespaced it can only compose resources in its own
 		// namespace. Its OpenAPI schema won't allow including a namespace in
